@@ -20,5 +20,4 @@ lambda = 4*(sigma+1e-4)*sqrt(s*(1 + log(p/s)) / n);
 %% Get vector estimate
 [V_Usvd, V_Ssvd, ~] = svd(Vhat, 'econ');
 betahat = sqrt(V_Ssvd(1,1)*norm(Uhat))*V_Usvd(:, 1);
-signerr = sign(betahat'*betastar);
-error = norm(signerr*betahat - betastar)
+error = phaseless_err(betahat, betastar)

@@ -3,10 +3,16 @@ function [Uhat, Vhat, fval] = pr_opt_altmin(X, Y, lambda, s)
 [n, p] = size(X);
 
 % Play with these
-opttol = 3e-5;
-altmin_tol = 1e-2;
+opttol = 1e-4;
+altmin_tol = 1e-3;
 
 normsqest = 1/sqrt(n) + max(mean(Y), 0);
+
+% Normalize
+Y = Y/normsqest;
+lambda = lambda/normsqest;
+
+% thetastol = normsqest*opttol;
 
 [n, p] = size(X);
 
@@ -15,26 +21,12 @@ normsqest = 1/sqrt(n) + max(mean(Y), 0);
     end
 
 
-reg_single = @(U_) 0.5*lambda*(vecnorm(U_, 2, 1).^2 +(1/s)*vecnorm(U_, 1, 1).^2);
-reg_ind = @(U_, V_) reg_single(U_) + reg_single(V_);
+reg_ind = @(U_, V_) lambda*thetasnorm(U_, s).*thetasnorm(V_, s);
 reg_f = @(U_, V_) sum(reg_ind(U_, V_));
 
 f = @(U_, V_) fb(U_, V_) + reg_f(U_, V_);
 
-    % Utility function for computing prox-map on all columns of U or V
-    function u_ = prox_map(grad_, x_, step_)
-        u_ = zeros(size(x_));
-        for k = 1:size(x_, 2)
-            u_(:, k) = prox_l1(step_*grad_(:, k), x_(:, k), step_*lambda, step_*lambda/s);
-        end
-    end
-
-    function U_ = sq_lasso_solve(XV_, U0_)
-    % Solve modified LASSO
-    % argmin_u (1/(2*n))*( \sum_{i=1}^n (Y - \sum_{k=1}^r (Xm(i, :, k) ,u_k)) )^2
-    %       + 0.5*\sum_{k=1}^r (||u_k||_2^2 + (lambda/s)*||u_k||_1^2 )
-    % by accelerated proximal method
-
+    function U_ = sq_lasso_solve(XV_, Vnorms, U0_)
     converged = false;
         function [loss_, g_] = loss_grad_fun_(U__)
             XU__ = X*U__;
@@ -55,21 +47,18 @@ f = @(U_, V_) fb(U_, V_) + reg_f(U_, V_);
     U_old = U_;
     y_ = U_;
     
-    % Initial stepsize uses estimated Lipschitz constant based on size
-    % of observations. This may need to be adjusted for design vectors 
-    % that are not unit-variance
-    stepsize_ = 0.1*n / sum(XV_.^2, 'all');
+    stepsize_ = 1;
     while ~converged
         [loss_y_, g_y_] = loss_grad_fun_(y_);
-        
         backtracking = true;
         while backtracking
-            U_new_ = prox_map(g_y_, y_, stepsize_);
+            stepsizes = stepsize_ ./ Vnorms;
+            U_new_ = prox_l2_l1(stepsizes.*g_y_, y_, lambda*stepsize_, lambda*stepsize_/sqrt(s));
             loss_new = loss_fun_(U_new_);
-            if loss_new <= loss_y_ + sum((U_new_ - y_).*g_y_, 'all') + sum((U_new_ - y_).^2, 'all')/(2*stepsize_) + 1e-10
+            if loss_new <= loss_y_ + sum((U_new_ - y_).*g_y_, 'all') + sum(sum((U_new_ - y_).^2, 1)./(2*stepsizes)) + 1e-10
                 backtracking = false;
                 U_ = U_new_;
-                stepsize_ = 1.05*stepsize_;
+                stepsize_ = 1.2*stepsize_;
             else
                 stepsize_ = 0.8*stepsize_;
             end
@@ -77,16 +66,29 @@ f = @(U_, V_) fb(U_, V_) + reg_f(U_, V_);
         
         % Check optimality conditions
         if mod(i_, 5) == 4
+            nz_col = thetasnorm(U_, s).*Vnorms >= opttol;
+            U_nz_ = U_(:, nz_col);
+
             % Gradient including L2 term, normalized by L1 penalty
             [~, g_U_] = loss_grad_fun_(U_); 
-            gl2_norm = (g_U_ + lambda*U_)./(lambda/s*vecnorm(U_, 1, 1));
+            gl2_norm = sqrt(s) * (g_U_(:, nz_col) ./ (lambda*Vnorms(nz_col)) + U_nz_ ./ vecnorm(U_nz_, 2, 1));
 
-            nz_ind = find(U_(:));
-            err1 = max(gl2_norm(nz_ind) + sign(U_(nz_ind)));
+            nz_ind = find(U_nz_);
+            err1 = max(gl2_norm(nz_ind) + sign(U_nz_(nz_ind)));
+
             err2 = max(abs(gl2_norm(:))) - 1;
 
             if max(err1, err2) <= altmin_tol
-                converged = true;
+                % Check zero columns subgradient condition
+                if any(~nz_col)
+                    gl2_zero = g_U_(:, ~nz_col) ./ (lambda * Vnorms(~nz_col));
+                    gl2_z_thresh = max(abs(gl2_zero) - 1/sqrt(s), 0);
+                    if all(vecnorm(gl2_z_thresh, 2, 1) <= 1 + altmin_tol)
+                        converged = true;
+                    end
+                else
+                    converged = true;
+                end
             end
         end
         
@@ -124,7 +126,7 @@ f = @(U_, V_) fb(U_, V_) + reg_f(U_, V_);
         end
         
         % Play with this
-        stop = (max_err <= lambda*opttol*normsqest) || (count_since_best_ >= 40);
+        stop = (max_err <= lambda*opttol) || (count_since_best_ >= 10);
     end
 
 % Spectral initialization
@@ -138,19 +140,6 @@ U = zeros(p, 1);
 U(ii) = sqrt(D_ii/3)*V_ii;
 V = U;
 
-    % Utility function to make colums of U_, V_ have equal \theta_s norms
-    function [Unew_, Vnew_] = balance_UV_(U_, V_)
-        Unew_ = zeros(size(U_));
-        Vnew_ = zeros(size(V_));
-        U_norms_ = thetasnorm(U_, s);
-        V_norms_ = thetasnorm(V_, s);
-        z_ = (U_norms_ == 0) | (V_norms_ == 0);
-        
-        scaling = sqrt(U_norms_(~z_) ./ V_norms_(~z_));
-        Unew_(:, ~z_) = U_(:, ~z_) ./ scaling;
-        Vnew_(:, ~z_) = V_(:, ~z_) .* scaling;
-    end
-
 done = false;
 while ~done
     
@@ -160,11 +149,11 @@ while ~done
     altmin_it = 0;
     while ~altmin_conv
         XU = X*U;
-        V = sq_lasso_solve(XU, V);
-        [U, V] = balance_UV_(U, V);
+        V = sq_lasso_solve(XU, thetasnorm(U, s), V);
+        [U, V] = balance_UV(U, V, s, opttol);
         XV = X*V;
-        U = sq_lasso_solve(XV, U);
-        [U, V] = balance_UV_(U, V);
+        U = sq_lasso_solve(XV, thetasnorm(V, s), U);
+        [U, V] = balance_UV(U, V, s, opttol);
         
         altmin_conv = opt_cond_(U, V);
         altmin_it = altmin_it + 1;
@@ -177,7 +166,7 @@ while ~done
     [maxI, maxJ] = ind2sub([p, p], I);
     
     improvement = false;
-    if M > lambda*((1 + 1/s) + opttol)
+    if M > lambda*((1 + 1/sqrt(s))^2 + opttol)
         U_new = [U, zeros(p, 1)];
         V_new = [V, zeros(p, 1)];
         h = 0.1;
@@ -200,8 +189,9 @@ while ~done
     done = ~improvement;
 end
 
-Uhat = U;
-Vhat = V;
+Uhat = sqrt(normsqest)*U;
+Vhat = sqrt(normsqest)*V;
+fval = fval*normsqest^2;
 
 end
 

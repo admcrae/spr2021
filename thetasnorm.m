@@ -1,4 +1,4 @@
 function n = thetasnorm(u, s)
-    n = sqrt(sum(u.^2, 1) + (1/s)*sum(abs(u), 1).^2);
+    n = vecnorm(u, 2, 1) + (1 / sqrt(s))*vecnorm(u, 1, 1);
 end
 
